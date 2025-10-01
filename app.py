@@ -49,14 +49,15 @@ uploaded_file = st.file_uploader(
 # Вариант 2: Вставка таблицы
 st.markdown("### 📋 Или вставьте данные из Excel / Word")
 st.markdown("""
-Скопируйте диапазон ячеек (столбцы: **T (°C)**, **tau (ч)**, **sigma (МПа)**) и вставьте ниже.  
-Поддерживаются **запятые как десятичный разделитель** (например: 65,9).
+Скопируйте диапазон ячеек из Excel и вставьте ниже.  
+Поддерживаются **запятые как десятичный разделитель** (например: `44,1`).  
+Разделитель между столбцами — **пробелы** (как при копировании из Excel).
 """)
 
 pasted_data = st.text_area(
-    "Вставьте данные (первая строка — заголовки)",
+    "Вставьте данные (каждая строка: T(°C) τ(ч) σ(МПа))",
     height=200,
-    placeholder="T_C\tau\tsigma\n727\t1000\t65,9\n800\t500\t150"
+    placeholder="675 44,1 537\n650 49,2 1676\n594 60 4182"
 )
 
 # Обработка данных
@@ -77,64 +78,57 @@ if uploaded_file is not None:
     except Exception as e:
         st.error(f"Ошибка чтения файла: {e}")
 
-# Вставка текста
+# Вставка текста — ОСНОВНОЙ БЛОК ДЛЯ ВАС
 elif pasted_data.strip():
     try:
+        # Заменяем запятые на точки
         cleaned_data = pasted_data.replace(",", ".")
-        first_line = cleaned_data.split('\n')[0]
-        if '\t' in first_line:
-            sep = '\t'
-        elif ';' in first_line:
-            sep = ';'
-        elif first_line.count(' ') >= 2:
-            sep = r'\s+'
+        lines = [line.strip() for line in cleaned_data.splitlines() if line.strip()]
+        
+        if not lines:
+            st.error("Нет данных для обработки.")
+            df_input = None
         else:
-            sep = None
-        df_input = pd.read_csv(StringIO(cleaned_data), sep=sep, engine='python')
-        st.success(f"Распознано {len(df_input)} строк из вставленных данных.")
+            data_list = []
+            for i, line in enumerate(lines):
+                parts = [p for p in line.split() if p]  # разделяем по пробелам
+                if len(parts) != 3:
+                    st.warning(f"Строка {i+1}: ожидается 3 столбца, получено {len(parts)} — пропущена")
+                    continue
+                data_list.append(parts)
+            
+            if not data_list:
+                st.error("Не удалось распознать ни одной корректной строки с 3 столбцами.")
+                df_input = None
+            else:
+                df_input = pd.DataFrame(data_list, columns=["T_C", "tau", "sigma"])
+                st.success(f"✅ Распознано {len(df_input)} строк из вставленных данных.")
     except Exception as e:
-        st.error(f"Ошибка парсинга вставленных данных: {e}")
+        st.error(f"❌ Ошибка парсинга вставленных данных: {e}")
 
 # Сохранение данных в сессию
 if df_input is not None:
-    col_map = {}
-    for col in df_input.columns:
-        col_clean = str(col).strip().lower()
-        if any(kw in col_clean for kw in ["t_c", "temp", "temperature", "температура", "t°c", "tc", "t (c)"]):
-            col_map[col] = "T_C"
-        elif any(kw in col_clean for kw in ["tau", "time", "время", "t_r", "τ", "час", "ч"]):
-            col_map[col] = "tau"
-        elif any(kw in col_clean for kw in ["sigma", "stress", "напряжение", "σ", "mpa", "мпа"]):
-            col_map[col] = "sigma"
-    
-    df_input = df_input.rename(columns=col_map)
-    
-    required_cols = {"T_C", "tau", "sigma"}
-    if not required_cols.issubset(df_input.columns):
-        missing = required_cols - set(df_input.columns)
-        st.error(f"Не хватает столбцов: {missing}. Нужны: T_C, tau, sigma")
-    else:
-        records = []
-        for _, row in df_input[["T_C", "tau", "sigma"]].iterrows():
-            try:
-                t_c = float(row["T_C"])
-                tau_val = float(row["tau"])
-                sigma_val = float(row["sigma"])
-                # Физически разумные границы (можно расширить при необходимости)
-                if t_c < -50 or t_c > 2500:
-                    st.warning(f"Пропущена подозрительная температура: {t_c} °C")
-                    continue
-                if tau_val <= 0 or tau_val > 1e6:
-                    st.warning(f"Пропущено некорректное время: {tau_val} ч")
-                    continue
-                if sigma_val <= 0 or sigma_val > 2000:
-                    st.warning(f"Пропущено некорректное напряжение: {sigma_val} МПа")
-                    continue
-                records.append({"T_C": t_c, "tau": tau_val, "sigma": sigma_val})
-            except (ValueError, TypeError):
-                st.warning(f"Пропущена некорректная строка: T={row.get('T_C')}, τ={row.get('tau')}, σ={row.get('sigma')}")
+    records = []
+    for _, row in df_input.iterrows():
+        try:
+            t_c = float(row["T_C"])
+            tau_val = float(row["tau"])
+            sigma_val = float(row["sigma"])
+            # Физически разумные границы
+            if t_c < -50 or t_c > 2500:
+                st.warning(f"Пропущена подозрительная температура: {t_c} °C")
                 continue
-        st.session_state.data = records
+            if tau_val <= 0 or tau_val > 1e6:
+                st.warning(f"Пропущено некорректное время: {tau_val} ч")
+                continue
+            if sigma_val <= 0 or sigma_val > 2000:
+                st.warning(f"Пропущено некорректное напряжение: {sigma_val} МПа")
+                continue
+            records.append({"T_C": t_c, "tau": tau_val, "sigma": sigma_val})
+        except (ValueError, TypeError):
+            st.warning(f"Пропущена некорректная строка: {row.to_dict()}")
+            continue
+    st.session_state.data = records
 
 # === РУЧНОЙ ВВОД ===
 st.markdown("---")
@@ -170,7 +164,6 @@ if df.empty or len(df) < 3:
     st.warning("Добавьте минимум 3 точки для анализа.")
     st.stop()
 
-# Основная проверка: только положительные tau и sigma
 if (df["tau"] <= 0).any() or (df["sigma"] <= 0).any():
     st.error("Время до разрушения и напряжение должны быть положительными!")
     st.stop()
