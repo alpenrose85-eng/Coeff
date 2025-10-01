@@ -50,54 +50,67 @@ uploaded_file = st.file_uploader(
 st.markdown("### 📋 Или вставьте данные из Excel / Word")
 st.markdown("""
 Скопируйте диапазон ячеек (столбцы: **T (°C)**, **tau (ч)**, **sigma (МПа)**) и вставьте ниже.  
-Разделители: **табуляция, запятая, пробел или точка с запятой**.
+Поддерживаются **запятые как десятичный разделитель** (например: 65,9).
 """)
 
 pasted_data = st.text_area(
-    "Вставьте данные (первая строка — заголовки, например: T_C, tau, sigma)",
+    "Вставьте данные (первая строка — заголовки)",
     height=200,
-    placeholder="T_C\tau\tsigma\n727\t1000\t120\n800\t500\t150"
+    placeholder="T_C\tau\tsigma\n727\t1000\t65,9\n800\t500\t150"
 )
 
 # Обработка данных
 df_input = None
 
+# Загрузка файла
 if uploaded_file is not None:
     try:
         if uploaded_file.name.endswith(('.xlsx', '.xls')):
             df_input = pd.read_excel(uploaded_file)
         elif uploaded_file.name.endswith('.csv'):
-            df_input = pd.read_csv(uploaded_file)
+            # Пробуем сначала с точкой, потом с запятой
+            try:
+                df_input = pd.read_csv(uploaded_file)
+            except:
+                uploaded_file.seek(0)
+                df_input = pd.read_csv(uploaded_file, decimal=',', sep=';')
         st.success(f"Загружено {len(df_input)} строк из файла.")
     except Exception as e:
         st.error(f"Ошибка чтения файла: {e}")
 
+# Вставка текста
 elif pasted_data.strip():
     try:
-        sample = pasted_data.split('\n')[0]
-        if '\t' in sample:
+        # Заменяем запятые-десятичные на точки
+        cleaned_data = pasted_data.replace(",", ".")
+        
+        # Определяем разделитель
+        first_line = cleaned_data.split('\n')[0]
+        if '\t' in first_line:
             sep = '\t'
-        elif ';' in sample:
+        elif ';' in first_line:
             sep = ';'
-        elif ',' in sample:
-            sep = ','
+        elif first_line.count(' ') >= 2:
+            sep = r'\s+'
         else:
             sep = None
-        df_input = pd.read_csv(StringIO(pasted_data), sep=sep)
+        
+        df_input = pd.read_csv(StringIO(cleaned_data), sep=sep, engine='python')
         st.success(f"Распознано {len(df_input)} строк из вставленных данных.")
     except Exception as e:
         st.error(f"Ошибка парсинга вставленных данных: {e}")
 
-# Если данные получены — сохраняем в сессию
+# Сохранение данных в сессию
 if df_input is not None:
+    # Приводим названия колонок к стандарту
     col_map = {}
     for col in df_input.columns:
-        col_clean = str(col).strip().lower().replace(" ", "").replace("(", "").replace(")", "")
-        if any(kw in col_clean for kw in ["t_c", "temp", "temperature", "температура", "t°c", "tc"]):
+        col_clean = str(col).strip().lower()
+        if any(kw in col_clean for kw in ["t_c", "temp", "temperature", "температура", "t°c", "tc", "t (c)"]):
             col_map[col] = "T_C"
-        elif any(kw in col_clean for kw in ["tau", "time", "время", "t_r", "τ"]):
+        elif any(kw in col_clean for kw in ["tau", "time", "время", "t_r", "τ", "час", "ч"]):
             col_map[col] = "tau"
-        elif any(kw in col_clean for kw in ["sigma", "stress", "напряжение", "σ", "mpa"]):
+        elif any(kw in col_clean for kw in ["sigma", "stress", "напряжение", "σ", "mpa", "мпа"]):
             col_map[col] = "sigma"
     
     df_input = df_input.rename(columns=col_map)
@@ -107,7 +120,19 @@ if df_input is not None:
         missing = required_cols - set(df_input.columns)
         st.error(f"Не хватает столбцов: {missing}. Нужны: T_C, tau, sigma")
     else:
-        st.session_state.data = df_input[["T_C", "tau", "sigma"]].to_dict('records')
+        # Приведение к float с защитой от строк
+        records = []
+        for _, row in df_input[["T_C", "tau", "sigma"]].iterrows():
+            try:
+                records.append({
+                    "T_C": float(row["T_C"]),
+                    "tau": float(row["tau"]),
+                    "sigma": float(row["sigma"])
+                })
+            except (ValueError, TypeError):
+                st.warning(f"Пропущена некорректная строка: {row.to_dict()}")
+                continue
+        st.session_state.data = records
 
 # === РУЧНОЙ ВВОД ===
 st.markdown("---")
@@ -198,7 +223,7 @@ st.markdown("> T — температура в Кельвинах (T = T°C + 27
 
 col1, col2 = st.columns(2)
 col1.metric("Коэффициент C", f"{C_opt:.4f}")
-col2.metric("R²", f"{r2:.4f}")
+col2.metric("Коэффициент детерминации R²", f"{r2:.4f}")
 
 st.markdown(f"**Уравнение регрессии:** $\\log_{{10}}(\\sigma) = {a:.4f} \\cdot P + {b:.4f}$")
 
