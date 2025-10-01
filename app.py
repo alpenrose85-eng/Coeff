@@ -2,8 +2,7 @@ import streamlit as st
 import numpy as np
 import pandas as pd
 from scipy.optimize import minimize_scalar
-from sklearn.linear_model import LinearRegression
-from sklearn.metrics import r2_score
+from scipy.interpolate import UnivariateSpline
 import matplotlib.pyplot as plt
 import json
 from io import StringIO
@@ -194,14 +193,36 @@ def calc_lm(T_K, tau, C):
 def calc_trunin(T_K, tau, C):
     return T_K * (np.log10(tau) - 2 * np.log10(T_K) + C)
 
-def objective(C, T_K, tau, sigma, model_func):
+def objective(C, T_K, tau, sigma, model_func, s_factor=1.0):
     P = model_func(T_K, tau, C)
     if not np.all(np.isfinite(P)):
         return 1e6
-    log_sigma = np.log10(sigma)
-    reg = LinearRegression().fit(P.reshape(-1, 1), log_sigma)
-    r2 = r2_score(log_sigma, reg.predict(P.reshape(-1, 1)))
-    return -r2
+
+    N = len(P)
+    s_val = s_factor * N
+
+    try:
+        sorted_idx = np.argsort(P)
+        P_sorted = P[sorted_idx]
+        sigma_sorted = sigma[sorted_idx]
+
+        spline = UnivariateSpline(P_sorted, sigma_sorted, s=s_val, k=3)
+        sigma_pred = spline(P)
+
+        ss_res = np.sum((sigma - sigma_pred) ** 2)
+        ss_tot = np.sum((sigma - np.mean(sigma)) ** 2)
+        if ss_tot == 0:
+            r2 = 0
+        else:
+            r2 = 1 - (ss_res / ss_tot)
+
+        if not np.isfinite(r2) or r2 < -10:
+            return 1e6
+
+        return -r2  # минимизируем отрицательный R²
+
+    except Exception:
+        return 1e6
 
 # === ВЫБОР МОДЕЛИ ===
 model_func = calc_trunin if model == "Трунина" else calc_lm
@@ -216,7 +237,15 @@ T_K_vals = df["T_K"].values
 tau_vals = df["tau"].values
 sigma_vals = df["sigma"].values
 
-res = minimize_scalar(objective, bounds=C_bounds, args=(T_K_vals, tau_vals, sigma_vals, model_func), method='bounded')
+# === ОПТИМИЗАЦИЯ ===
+S_FACTOR = 1.0  # можно сделать настройкой, но пока фиксирован
+
+res = minimize_scalar(
+    objective,
+    bounds=C_bounds,
+    args=(T_K_vals, tau_vals, sigma_vals, model_func, S_FACTOR),
+    method='bounded'
+)
 C_opt = res.x
 P_opt = model_func(T_K_vals, tau_vals, C_opt)
 
@@ -224,10 +253,24 @@ if not np.all(np.isfinite(P_opt)):
     st.error("Ошибка расчёта параметра. Проверьте данные.")
     st.stop()
 
-log_sigma = np.log10(sigma_vals)
-reg = LinearRegression().fit(P_opt.reshape(-1, 1), log_sigma)
-r2 = r2_score(log_sigma, reg.predict(P_opt.reshape(-1, 1)))
-a, b = reg.coef_[0], reg.intercept_
+# Финальный расчёт R² и сплайна
+N = len(P_opt)
+s_val = S_FACTOR * N
+sorted_idx = np.argsort(P_opt)
+P_sorted = P_opt[sorted_idx]
+sigma_sorted = sigma_vals[sorted_idx]
+
+try:
+    spline_final = UnivariateSpline(P_sorted, sigma_sorted, s=s_val, k=3)
+    sigma_pred_final = spline_final(P_opt)
+
+    ss_res = np.sum((sigma_vals - sigma_pred_final) ** 2)
+    ss_tot = np.sum((sigma_vals - np.mean(sigma_vals)) ** 2)
+    r2 = 1 - (ss_res / ss_tot) if ss_tot != 0 else 0
+except Exception as e:
+    st.error(f"Ошибка построения аппроксимации: {e}")
+    r2 = 0
+    spline_final = None
 
 # === ВЫВОД РЕЗУЛЬТАТОВ ===
 st.subheader("Результаты подбора")
@@ -238,19 +281,21 @@ col1, col2 = st.columns(2)
 col1.metric("Коэффициент C", f"{C_opt:.4f}")
 col2.metric("Коэффициент детерминации R²", f"{r2:.4f}")
 
-st.markdown("**Уравнение длительной прочности:**")
-st.markdown(f"$$ \\sigma = 10^{{ {a:.4f} \\cdot P + {b:.4f} }} \\quad \\text{{(МПа)}} $$")
-st.markdown(f"или в логарифмической форме:")
-st.markdown(f"$$ \\log_{{10}}(\\sigma) = {a:.4f} \\cdot P + {b:.4f} $$")
+st.markdown("""
+**Метод подбора:**  
+Коэффициент C выбран так, чтобы экспериментальные точки (P, σ) имели минимальный разброс  
+относительно гладкой кривой, построенной методом сглаживающего сплайна.
+""")
 
-# === ГРАФИК (ФИЗИЧНАЯ ЭКСПОНЕНЦИАЛЬНАЯ ЗАВИСИМОСТЬ) ===
+# === ГРАФИК ===
 st.subheader("График зависимости напряжения от параметра жаропрочности")
 fig, ax = plt.subplots(figsize=(8, 5))
 ax.scatter(P_opt, sigma_vals, color='red', label='Экспериментальные данные')
 
-P_fit = np.linspace(P_opt.min(), P_opt.max(), 200)
-sigma_fit = 10 ** (a * P_fit + b)  # ЭКСПОНЕНЦИАЛЬНАЯ КРИВАЯ
-ax.plot(P_fit, sigma_fit, 'b-', linewidth=2, label='Аппроксимация')
+if spline_final is not None:
+    P_fit = np.linspace(P_opt.min(), P_opt.max(), 300)
+    sigma_fit = spline_final(P_fit)
+    ax.plot(P_fit, sigma_fit, 'b-', linewidth=2, label='Гладкая аппроксимация (сплайн)')
 
 ax.set_xlabel("Параметр жаропрочности P")
 ax.set_ylabel("Напряжение, МПа")
@@ -264,7 +309,6 @@ st.subheader("Рассчитанные значения")
 df_display = df[["T_C", "tau", "sigma"]].copy()
 df_display["T (K)"] = df["T_K"]
 df_display["P"] = P_opt
-df_display["log10(σ)"] = log_sigma
 df_display = df_display.rename(columns={"T_C": "T (°C)"})
 st.dataframe(df_display.round(4))
 
