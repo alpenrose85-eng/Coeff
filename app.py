@@ -6,7 +6,7 @@ from sklearn.linear_model import LinearRegression
 from sklearn.metrics import r2_score
 import matplotlib.pyplot as plt
 import json
-import io
+from io import StringIO
 
 # Настройка страницы
 st.set_page_config(page_title="Параметры жаропрочности", layout="wide")
@@ -62,7 +62,6 @@ pasted_data = st.text_area(
 # Обработка данных
 df_input = None
 
-# Приоритет: файл > вставка > сессия
 if uploaded_file is not None:
     try:
         if uploaded_file.name.endswith(('.xlsx', '.xls')):
@@ -75,7 +74,6 @@ if uploaded_file is not None:
 
 elif pasted_data.strip():
     try:
-        # Определяем разделитель
         sample = pasted_data.split('\n')[0]
         if '\t' in sample:
             sep = '\t'
@@ -84,9 +82,7 @@ elif pasted_data.strip():
         elif ',' in sample:
             sep = ','
         else:
-            sep = None  # пробелы или смешанные — pandas попробует сам
-
-        from io import StringIO
+            sep = None
         df_input = pd.read_csv(StringIO(pasted_data), sep=sep)
         st.success(f"Распознано {len(df_input)} строк из вставленных данных.")
     except Exception as e:
@@ -94,15 +90,14 @@ elif pasted_data.strip():
 
 # Если данные получены — сохраняем в сессию
 if df_input is not None:
-    # Приводим названия колонок к единому виду
     col_map = {}
     for col in df_input.columns:
-        col_lower = col.strip().lower()
-        if col_lower in ["t", "t_c", "temperature", "температура", "t (°c)", "t(c)"]:
+        col_clean = str(col).strip().lower().replace(" ", "").replace("(", "").replace(")", "")
+        if any(kw in col_clean for kw in ["t_c", "temp", "temperature", "температура", "t°c", "tc"]):
             col_map[col] = "T_C"
-        elif col_lower in ["tau", "t_r", "время", "time", "τ", "tau (h)", "tau (ч)"]:
+        elif any(kw in col_clean for kw in ["tau", "time", "время", "t_r", "τ"]):
             col_map[col] = "tau"
-        elif col_lower in ["sigma", "напряжение", "stress", "σ", "sigma (mpa)", "sigma (мпа)"]:
+        elif any(kw in col_clean for kw in ["sigma", "stress", "напряжение", "σ", "mpa"]):
             col_map[col] = "sigma"
     
     df_input = df_input.rename(columns=col_map)
@@ -110,12 +105,11 @@ if df_input is not None:
     required_cols = {"T_C", "tau", "sigma"}
     if not required_cols.issubset(df_input.columns):
         missing = required_cols - set(df_input.columns)
-        st.error(f"Не хватает столбцов: {missing}. Убедитесь, что есть T_C, tau, sigma.")
+        st.error(f"Не хватает столбцов: {missing}. Нужны: T_C, tau, sigma")
     else:
-        # Сохраняем только нужные столбцы как список словарей
         st.session_state.data = df_input[["T_C", "tau", "sigma"]].to_dict('records')
 
-# === РУЧНОЙ ВВОД (оставим для небольших правок) ===
+# === РУЧНОЙ ВВОД ===
 st.markdown("---")
 st.subheader("Ручной ввод (для правки)")
 
@@ -127,7 +121,7 @@ col_btn1, col_btn2, col_btn3 = st.columns(3)
 if col_btn1.button("Добавить строку"):
     st.session_state.data.append({"T_C": 727.0, "tau": 1000.0, "sigma": 100.0})
 if col_btn2.button("Удалить последнюю"):
-    if st.session_state.
+    if len(st.session_state.data) > 0:
         st.session_state.data.pop()
 if col_btn3.button("Очистить всё"):
     st.session_state.data = []
@@ -203,27 +197,27 @@ st.markdown(f"**Формула:** {formula_str}")
 st.markdown("> T — температура в Кельвинах (T = T°C + 273.15)")
 
 col1, col2 = st.columns(2)
-col1.metric("C", f"{C_opt:.4f}")
+col1.metric("Коэффициент C", f"{C_opt:.4f}")
 col2.metric("R²", f"{r2:.4f}")
 
-st.markdown(f"**Регрессия:** $\\log_{{10}}(\\sigma) = {a:.4f} \\cdot P + {b:.4f}$")
+st.markdown(f"**Уравнение регрессии:** $\\log_{{10}}(\\sigma) = {a:.4f} \\cdot P + {b:.4f}$")
 
 # График
-st.subheader("График")
+st.subheader("График зависимости напряжения от параметра жаропрочности")
 fig, ax = plt.subplots(figsize=(8, 5))
-ax.scatter(P_opt, sigma_vals, color='red', label='Данные')
+ax.scatter(P_opt, sigma_vals, color='red', label='Экспериментальные данные')
 P_fit = np.linspace(P_opt.min(), P_opt.max(), 200)
 sigma_fit = 10 ** (a * P_fit + b)
 ax.plot(P_fit, sigma_fit, 'b--', label='Аппроксимация')
-ax.set_xlabel("Параметр P")
+ax.set_xlabel("Параметр жаропрочности P")
 ax.set_ylabel("Напряжение, МПа")
 ax.set_yscale('log')
 ax.grid(True, which="both", ls="--", alpha=0.6)
 ax.legend()
 st.pyplot(fig)
 
-# Таблица
-st.subheader("Данные")
+# Таблица результатов
+st.subheader("Рассчитанные значения")
 df_display = df[["T_C", "tau", "sigma"]].copy()
 df_display["T (K)"] = df["T_K"]
 df_display["P"] = P_opt
