@@ -63,25 +63,36 @@ pasted_data = st.text_area(
 # Обработка данных
 df_input = None
 
-# Загрузка файла
+# Загрузка файла — БЕЗ ЗАВИСИМОСТИ ОТ ЗАГОЛОВКОВ
 if uploaded_file is not None:
     try:
         if uploaded_file.name.endswith(('.xlsx', '.xls')):
-            df_input = pd.read_excel(uploaded_file)
+            df_raw = pd.read_excel(uploaded_file, header=None)
         elif uploaded_file.name.endswith('.csv'):
             try:
-                df_input = pd.read_csv(uploaded_file)
+                df_raw = pd.read_csv(uploaded_file, header=None)
             except:
                 uploaded_file.seek(0)
-                df_input = pd.read_csv(uploaded_file, decimal=',', sep=';')
-        st.success(f"Загружено {len(df_input)} строк из файла.")
-    except Exception as e:
-        st.error(f"Ошибка чтения файла: {e}")
+                df_raw = pd.read_csv(uploaded_file, decimal=',', sep=';', header=None)
+        else:
+            st.error("Неподдерживаемый формат файла.")
+            df_raw = None
 
-# Вставка текста — ОСНОВНОЙ БЛОК ДЛЯ ВАС
+        if df_raw is not None:
+            df_raw.dropna(how='all', inplace=True)
+            if df_raw.empty or df_raw.shape[1] < 3:
+                st.error("Файл должен содержать минимум 3 столбца.")
+                df_input = None
+            else:
+                df_input = df_raw.iloc[:, :3].copy()
+                df_input.columns = ["T_C", "tau", "sigma"]
+                st.success(f"✅ Загружено {len(df_input)} строк из файла.")
+    except Exception as e:
+        st.error(f"❌ Ошибка чтения файла: {e}")
+
+# Вставка текста — поддержка пробелов и запятых
 elif pasted_data.strip():
     try:
-        # Заменяем запятые на точки
         cleaned_data = pasted_data.replace(",", ".")
         lines = [line.strip() for line in cleaned_data.splitlines() if line.strip()]
         
@@ -91,12 +102,21 @@ elif pasted_data.strip():
         else:
             data_list = []
             for i, line in enumerate(lines):
-                parts = [p for p in line.split() if p]  # разделяем по пробелам
-                if len(parts) != 3:
-                    st.warning(f"Строка {i+1}: ожидается 3 столбца, получено {len(parts)} — пропущена")
-                    continue
-                data_list.append(parts)
-            
+                parts = [p for p in line.split() if p]
+                if len(parts) == 3:
+                    data_list.append(parts)
+                elif len(parts) == 1 and len(line) >= 6:
+                    s = line
+                    t_c = s[:3] if len(s) >= 3 else ""
+                    tau = s[3:6] if len(s) >= 6 else ""
+                    sigma = s[6:] if len(s) > 6 else ""
+                    if t_c and tau and sigma:
+                        data_list.append([t_c, tau, sigma])
+                    else:
+                        st.warning(f"Строка {i+1}: не удалось разделить '{s}'")
+                else:
+                    st.warning(f"Строка {i+1}: не 3 столбца — пропущена")
+
             if not data_list:
                 st.error("Не удалось распознать ни одной корректной строки с 3 столбцами.")
                 df_input = None
@@ -114,7 +134,6 @@ if df_input is not None:
             t_c = float(row["T_C"])
             tau_val = float(row["tau"])
             sigma_val = float(row["sigma"])
-            # Физически разумные границы
             if t_c < -50 or t_c > 2500:
                 st.warning(f"Пропущена подозрительная температура: {t_c} °C")
                 continue
@@ -137,7 +156,6 @@ st.subheader("Ручной ввод (для правки)")
 if "data" not in st.session_state:
     st.session_state.data = []
 
-# Кнопки управления
 col_btn1, col_btn2, col_btn3 = st.columns(3)
 if col_btn1.button("Добавить строку"):
     st.session_state.data.append({"T_C": 727.0, "tau": 1000.0, "sigma": 100.0})
@@ -147,7 +165,6 @@ if col_btn2.button("Удалить последнюю"):
 if col_btn3.button("Очистить всё"):
     st.session_state.data = []
 
-# Таблица ручного ввода — БЕЗ min_value / max_value!
 edited_data = []
 for i, row in enumerate(st.session_state.data):
     cols = st.columns(3)
@@ -204,7 +221,7 @@ C_opt = res.x
 P_opt = model_func(T_K_vals, tau_vals, C_opt)
 
 if not np.all(np.isfinite(P_opt)):
-    st.error("Ошибка расчёта параметра. Проверьте данные (особенно очень большие/малые значения).")
+    st.error("Ошибка расчёта параметра. Проверьте данные.")
     st.stop()
 
 log_sigma = np.log10(sigma_vals)
@@ -212,24 +229,29 @@ reg = LinearRegression().fit(P_opt.reshape(-1, 1), log_sigma)
 r2 = r2_score(log_sigma, reg.predict(P_opt.reshape(-1, 1)))
 a, b = reg.coef_[0], reg.intercept_
 
-# === ВЫВОД ===
+# === ВЫВОД РЕЗУЛЬТАТОВ ===
 st.subheader("Результаты подбора")
-st.markdown(f"**Формула:** {formula_str}")
+st.markdown(f"**Формула параметра:** {formula_str}")
 st.markdown("> T — температура в Кельвинах (T = T°C + 273.15)")
 
 col1, col2 = st.columns(2)
 col1.metric("Коэффициент C", f"{C_opt:.4f}")
 col2.metric("Коэффициент детерминации R²", f"{r2:.4f}")
 
-st.markdown(f"**Уравнение регрессии:** $\\log_{{10}}(\\sigma) = {a:.4f} \\cdot P + {b:.4f}$")
+st.markdown("**Уравнение длительной прочности:**")
+st.markdown(f"$$ \\sigma = 10^{{ {a:.4f} \\cdot P + {b:.4f} }} \\quad \\text{{(МПа)}} $$")
+st.markdown(f"или в логарифмической форме:")
+st.markdown(f"$$ \\log_{{10}}(\\sigma) = {a:.4f} \\cdot P + {b:.4f} $$")
 
-# График
+# === ГРАФИК (ФИЗИЧНАЯ ЭКСПОНЕНЦИАЛЬНАЯ ЗАВИСИМОСТЬ) ===
 st.subheader("График зависимости напряжения от параметра жаропрочности")
 fig, ax = plt.subplots(figsize=(8, 5))
 ax.scatter(P_opt, sigma_vals, color='red', label='Экспериментальные данные')
+
 P_fit = np.linspace(P_opt.min(), P_opt.max(), 200)
-sigma_fit = 10 ** (a * P_fit + b)
-ax.plot(P_fit, sigma_fit, 'b--', label='Аппроксимация')
+sigma_fit = 10 ** (a * P_fit + b)  # ЭКСПОНЕНЦИАЛЬНАЯ КРИВАЯ
+ax.plot(P_fit, sigma_fit, 'b-', linewidth=2, label='Аппроксимация')
+
 ax.set_xlabel("Параметр жаропрочности P")
 ax.set_ylabel("Напряжение, МПа")
 ax.set_yscale('log')
@@ -237,7 +259,7 @@ ax.grid(True, which="both", ls="--", alpha=0.6)
 ax.legend()
 st.pyplot(fig)
 
-# Таблица результатов
+# === ТАБЛИЦА РЕЗУЛЬТАТОВ ===
 st.subheader("Рассчитанные значения")
 df_display = df[["T_C", "tau", "sigma"]].copy()
 df_display["T (K)"] = df["T_K"]
