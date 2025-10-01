@@ -68,7 +68,6 @@ if uploaded_file is not None:
         if uploaded_file.name.endswith(('.xlsx', '.xls')):
             df_input = pd.read_excel(uploaded_file)
         elif uploaded_file.name.endswith('.csv'):
-            # Пробуем сначала с точкой, потом с запятой
             try:
                 df_input = pd.read_csv(uploaded_file)
             except:
@@ -81,10 +80,7 @@ if uploaded_file is not None:
 # Вставка текста
 elif pasted_data.strip():
     try:
-        # Заменяем запятые-десятичные на точки
         cleaned_data = pasted_data.replace(",", ".")
-        
-        # Определяем разделитель
         first_line = cleaned_data.split('\n')[0]
         if '\t' in first_line:
             sep = '\t'
@@ -94,7 +90,6 @@ elif pasted_data.strip():
             sep = r'\s+'
         else:
             sep = None
-        
         df_input = pd.read_csv(StringIO(cleaned_data), sep=sep, engine='python')
         st.success(f"Распознано {len(df_input)} строк из вставленных данных.")
     except Exception as e:
@@ -102,7 +97,6 @@ elif pasted_data.strip():
 
 # Сохранение данных в сессию
 if df_input is not None:
-    # Приводим названия колонок к стандарту
     col_map = {}
     for col in df_input.columns:
         col_clean = str(col).strip().lower()
@@ -120,17 +114,25 @@ if df_input is not None:
         missing = required_cols - set(df_input.columns)
         st.error(f"Не хватает столбцов: {missing}. Нужны: T_C, tau, sigma")
     else:
-        # Приведение к float с защитой от строк
         records = []
         for _, row in df_input[["T_C", "tau", "sigma"]].iterrows():
             try:
-                records.append({
-                    "T_C": float(row["T_C"]),
-                    "tau": float(row["tau"]),
-                    "sigma": float(row["sigma"])
-                })
+                t_c = float(row["T_C"])
+                tau_val = float(row["tau"])
+                sigma_val = float(row["sigma"])
+                # Физически разумные границы (можно расширить при необходимости)
+                if t_c < -50 or t_c > 2500:
+                    st.warning(f"Пропущена подозрительная температура: {t_c} °C")
+                    continue
+                if tau_val <= 0 or tau_val > 1e6:
+                    st.warning(f"Пропущено некорректное время: {tau_val} ч")
+                    continue
+                if sigma_val <= 0 or sigma_val > 2000:
+                    st.warning(f"Пропущено некорректное напряжение: {sigma_val} МПа")
+                    continue
+                records.append({"T_C": t_c, "tau": tau_val, "sigma": sigma_val})
             except (ValueError, TypeError):
-                st.warning(f"Пропущена некорректная строка: {row.to_dict()}")
+                st.warning(f"Пропущена некорректная строка: T={row.get('T_C')}, τ={row.get('tau')}, σ={row.get('sigma')}")
                 continue
         st.session_state.data = records
 
@@ -151,13 +153,13 @@ if col_btn2.button("Удалить последнюю"):
 if col_btn3.button("Очистить всё"):
     st.session_state.data = []
 
-# Таблица ручного ввода
+# Таблица ручного ввода — БЕЗ min_value / max_value!
 edited_data = []
 for i, row in enumerate(st.session_state.data):
     cols = st.columns(3)
-    T_C = cols[0].number_input(f"T (°C) {i+1}", value=float(row["T_C"]), min_value=100.0, max_value=1500.0, step=10.0, key=f"T_C_{i}")
-    tau = cols[1].number_input(f"τ (ч) {i+1}", value=float(row["tau"]), min_value=1.0, step=10.0, key=f"tau_{i}")
-    sigma = cols[2].number_input(f"σ (МПа) {i+1}", value=float(row["sigma"]), min_value=1.0, step=1.0, key=f"sigma_{i}")
+    T_C = cols[0].number_input(f"T (°C) {i+1}", value=float(row["T_C"]), step=10.0, key=f"T_C_{i}")
+    tau = cols[1].number_input(f"τ (ч) {i+1}", value=float(row["tau"]), step=100.0, key=f"tau_{i}")
+    sigma = cols[2].number_input(f"σ (МПа) {i+1}", value=float(row["sigma"]), step=1.0, key=f"sigma_{i}")
     edited_data.append({"T_C": T_C, "tau": tau, "sigma": sigma})
 
 st.session_state.data = edited_data
@@ -168,8 +170,9 @@ if df.empty or len(df) < 3:
     st.warning("Добавьте минимум 3 точки для анализа.")
     st.stop()
 
+# Основная проверка: только положительные tau и sigma
 if (df["tau"] <= 0).any() or (df["sigma"] <= 0).any():
-    st.error("Время и напряжение должны быть положительными!")
+    st.error("Время до разрушения и напряжение должны быть положительными!")
     st.stop()
 
 df["T_K"] = df["T_C"] + 273.15
@@ -208,7 +211,7 @@ C_opt = res.x
 P_opt = model_func(T_K_vals, tau_vals, C_opt)
 
 if not np.all(np.isfinite(P_opt)):
-    st.error("Ошибка расчёта параметра. Проверьте данные.")
+    st.error("Ошибка расчёта параметра. Проверьте данные (особенно очень большие/малые значения).")
     st.stop()
 
 log_sigma = np.log10(sigma_vals)
